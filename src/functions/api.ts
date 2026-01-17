@@ -428,3 +428,120 @@ app.http("updateHouse", {
   authLevel: "anonymous",
   handler: updateHouse,
 });
+
+// ============================================
+// Trends / Analytics Endpoints
+// ============================================
+
+// GET /api/trends/daily - Get daily trend data
+async function getDailyTrends(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const tenantId = request.query.get("tenantId") || "arrowfoot";
+  const days = parseInt(request.query.get("days") || "30");
+  const farmId = request.query.get("farmId") || null;
+
+  try {
+    const dbPool = await getPool();
+    const req = dbPool.request()
+      .input("TenantId", sql.NVarChar, tenantId)
+      .input("Days", sql.Int, days);
+
+    if (farmId) {
+      req.input("FarmId", sql.UniqueIdentifier, farmId);
+    } else {
+      req.input("FarmId", sql.UniqueIdentifier, null);
+    }
+
+    const result = await req.execute("usp_GetDailyTrends");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching daily trends: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// GET /api/trends/summary - Get portfolio trend summary
+async function getTrendSummary(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const tenantId = request.query.get("tenantId") || "arrowfoot";
+
+  try {
+    const dbPool = await getPool();
+
+    // Get today vs 7 days ago comparison
+    const result = await dbPool.request()
+      .input("tenantId", sql.NVarChar, tenantId)
+      .query(`
+        WITH TodayData AS (
+          SELECT
+            AVG(d.AvgTemperature) as avgTemp,
+            AVG(d.AvgHumidity) as avgHumidity,
+            AVG(d.AvgAmmonia) as avgAmmonia,
+            SUM(d.CriticalAlertCount) as criticalAlerts,
+            SUM(d.WarningAlertCount) as warningAlerts,
+            SUM(d.BirdCount) as totalBirds
+          FROM DailyKPIs d
+          JOIN Houses h ON d.HouseId = h.HouseId
+          JOIN Farms f ON h.FarmId = f.FarmId
+          JOIN Tenants t ON f.TenantId = t.TenantId
+          WHERE t.Name = @tenantId
+            AND d.Date = CAST(GETUTCDATE() AS DATE)
+        ),
+        LastWeekData AS (
+          SELECT
+            AVG(d.AvgTemperature) as avgTemp,
+            AVG(d.AvgHumidity) as avgHumidity,
+            AVG(d.AvgAmmonia) as avgAmmonia,
+            SUM(d.CriticalAlertCount) as criticalAlerts,
+            SUM(d.WarningAlertCount) as warningAlerts,
+            SUM(d.BirdCount) as totalBirds
+          FROM DailyKPIs d
+          JOIN Houses h ON d.HouseId = h.HouseId
+          JOIN Farms f ON h.FarmId = f.FarmId
+          JOIN Tenants t ON f.TenantId = t.TenantId
+          WHERE t.Name = @tenantId
+            AND d.Date = CAST(DATEADD(DAY, -7, GETUTCDATE()) AS DATE)
+        )
+        SELECT
+          t.avgTemp as todayAvgTemp,
+          t.avgHumidity as todayAvgHumidity,
+          t.avgAmmonia as todayAvgAmmonia,
+          t.criticalAlerts as todayCriticalAlerts,
+          t.warningAlerts as todayWarningAlerts,
+          t.totalBirds as todayTotalBirds,
+          l.avgTemp as lastWeekAvgTemp,
+          l.avgHumidity as lastWeekAvgHumidity,
+          l.avgAmmonia as lastWeekAvgAmmonia,
+          l.criticalAlerts as lastWeekCriticalAlerts,
+          l.warningAlerts as lastWeekWarningAlerts,
+          l.totalBirds as lastWeekTotalBirds
+        FROM TodayData t, LastWeekData l
+      `);
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset[0] || {}),
+    };
+  } catch (error) {
+    context.log(`Error fetching trend summary: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+app.http("getDailyTrends", {
+  methods: ["GET"],
+  route: "trends/daily",
+  authLevel: "anonymous",
+  handler: getDailyTrends,
+});
+
+app.http("getTrendSummary", {
+  methods: ["GET"],
+  route: "trends/summary",
+  authLevel: "anonymous",
+  handler: getTrendSummary,
+});
