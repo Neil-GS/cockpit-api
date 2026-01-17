@@ -142,6 +142,46 @@ async function getFarms(request: HttpRequest, context: InvocationContext): Promi
       }
     }
 
+    // Get active alerts (optionally filtered by tenant)
+    const alertsReq = dbPool.request();
+    let alertsQuery = `
+      SELECT
+        a.AlertId as id,
+        a.HouseId as houseId,
+        h.Name as houseName,
+        f.Name as farmName,
+        a.Type as type,
+        a.Severity as severity,
+        a.Metric as metric,
+        a.Value as value,
+        a.Threshold as threshold,
+        a.Message as message,
+        a.IsActive as isActive,
+        a.CreatedAt as timestamp,
+        a.AcknowledgedAt as acknowledgedAt,
+        a.AcknowledgedBy as acknowledgedBy
+      FROM Alerts a
+      JOIN Houses h ON a.HouseId = h.HouseId
+      JOIN Farms f ON h.FarmId = f.FarmId
+      JOIN Tenants t ON f.TenantId = t.TenantId
+      WHERE a.IsActive = 1
+    `;
+    if (tenantId) {
+      alertsQuery += ` AND t.Name = @tenantId`;
+      alertsReq.input("tenantId", sql.NVarChar, tenantId);
+    }
+    alertsQuery += ` ORDER BY a.CreatedAt DESC`;
+    const alertsResult = await alertsReq.query(alertsQuery);
+
+    // Build alerts map by house
+    const alertsByHouse: Record<string, unknown[]> = {};
+    for (const alert of alertsResult.recordset) {
+      if (!alertsByHouse[alert.houseId]) {
+        alertsByHouse[alert.houseId] = [];
+      }
+      alertsByHouse[alert.houseId].push(alert);
+    }
+
     // Map houses to farms
     const housesByFarm: Record<string, unknown[]> = {};
     for (const house of housesResult.recordset) {
@@ -161,7 +201,7 @@ async function getFarms(request: HttpRequest, context: InvocationContext): Promi
           lighting: 20,
           timestamp: new Date(),
         },
-        alerts: [], // Alerts fetched separately
+        alerts: alertsByHouse[house.id] || [],
       });
     }
 
@@ -622,6 +662,73 @@ async function updateHouse(request: HttpRequest, context: InvocationContext): Pr
   }
 }
 
+// GET /api/manage/events - Get recent sensor events for diagnostics
+async function getRecentEvents(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const limit = Math.min(parseInt(request.query.get("limit") || "100"), 500);
+  const tenantId = request.query.get("tenantId") || null;
+
+  try {
+    const dbPool = await getPool();
+    const req = dbPool.request().input("Limit", sql.Int, limit);
+
+    let query = `
+      SELECT TOP (@Limit)
+        se.EventId as id,
+        se.HouseId as houseId,
+        h.Name as houseName,
+        f.Name as farmName,
+        t.DisplayName as tenantName,
+        et.Code as eventType,
+        et.Name as eventName,
+        et.Category as category,
+        et.Unit as unit,
+        se.Value as value,
+        se.BoolValue as boolValue,
+        se.DeviceId as deviceId,
+        se.Timestamp as timestamp
+      FROM SensorEvents se
+      JOIN SensorEventTypes et ON se.EventTypeId = et.EventTypeId
+      JOIN Houses h ON se.HouseId = h.HouseId
+      JOIN Farms f ON h.FarmId = f.FarmId
+      JOIN Tenants t ON f.TenantId = t.TenantId
+    `;
+
+    if (tenantId) {
+      query += ` WHERE t.Name = @TenantId`;
+      req.input("TenantId", sql.NVarChar, tenantId);
+    }
+
+    query += ` ORDER BY se.Timestamp DESC`;
+
+    const result = await req.query(query);
+
+    // Also get summary stats
+    const statsResult = await dbPool.request().query(`
+      SELECT
+        COUNT(*) as totalEvents,
+        COUNT(DISTINCT se.HouseId) as housesReporting,
+        MIN(se.Timestamp) as oldestEvent,
+        MAX(se.Timestamp) as newestEvent,
+        COUNT(CASE WHEN se.Timestamp > DATEADD(MINUTE, -5, GETUTCDATE()) THEN 1 END) as eventsLast5Min,
+        COUNT(CASE WHEN se.Timestamp > DATEADD(HOUR, -1, GETUTCDATE()) THEN 1 END) as eventsLastHour,
+        COUNT(CASE WHEN se.Timestamp > DATEADD(DAY, -1, GETUTCDATE()) THEN 1 END) as eventsLast24Hr
+      FROM SensorEvents se
+    `);
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        events: result.recordset,
+        stats: statsResult.recordset[0] || {},
+      }),
+    };
+  } catch (error) {
+    context.log(`Error fetching recent events: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
 // Register Admin endpoints (use "manage" not "admin" - Azure reserves /admin/ for internal use)
 app.http("getAdminTenants", {
   methods: ["GET"],
@@ -663,6 +770,13 @@ app.http("updateHouse", {
   route: "manage/houses/{id}",
   authLevel: "anonymous",
   handler: updateHouse,
+});
+
+app.http("getRecentEvents", {
+  methods: ["GET"],
+  route: "manage/events",
+  authLevel: "anonymous",
+  handler: getRecentEvents,
 });
 
 // ============================================
