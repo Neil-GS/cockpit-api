@@ -378,7 +378,7 @@ app.http("getAlerts", {
   handler: getAlerts,
 });
 
-// GET /tenants - List all tenants (public)
+// GET /tenants - List all visible tenants (public)
 async function getTenants(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   try {
     const dbPool = await getPool();
@@ -393,7 +393,7 @@ async function getTenants(request: HttpRequest, context: InvocationContext): Pro
       FROM Tenants t
       LEFT JOIN Farms f ON t.TenantId = f.TenantId AND f.IsActive = 1
       LEFT JOIN Houses h ON f.FarmId = h.FarmId AND h.IsActive = 1
-      WHERE t.IsActive = 1
+      WHERE t.IsActive = 1 AND COALESCE(t.IsDisplayed, 1) = 1
       GROUP BY t.TenantId, t.Name, t.DisplayName, t.Color
       ORDER BY t.Name
     `);
@@ -414,6 +414,73 @@ app.http("getTenants", {
   route: "tenants",
   authLevel: "anonymous",
   handler: getTenants,
+});
+
+// GET /user/permissions - Get user's tenant permissions
+async function getUserPermissions(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const email = request.query.get("email");
+
+  if (!email) {
+    return { status: 400, body: "Email parameter required" };
+  }
+
+  try {
+    const dbPool = await getPool();
+    const result = await dbPool.request()
+      .input("email", sql.NVarChar, email)
+      .query(`
+        SELECT
+          ut.UserEmail as email,
+          ut.Role as role,
+          ut.IsGlobalAdmin as isGlobalAdmin,
+          t.TenantId as tenantId,
+          t.Name as tenantName,
+          t.DisplayName as tenantDisplayName
+        FROM UserTenants ut
+        JOIN Tenants t ON ut.TenantId = t.TenantId
+        WHERE ut.UserEmail = @email AND ut.IsActive = 1
+      `);
+
+    if (result.recordset.length === 0) {
+      // User not found - return default viewer permissions (can see displayed tenants)
+      return {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          isGlobalAdmin: false,
+          tenants: [],
+        }),
+      };
+    }
+
+    const firstRow = result.recordset[0];
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: firstRow.email,
+        isGlobalAdmin: firstRow.isGlobalAdmin,
+        role: firstRow.role,
+        tenants: result.recordset.map((r: any) => ({
+          id: r.tenantId,
+          name: r.tenantName,
+          displayName: r.tenantDisplayName,
+          role: r.role,
+        })),
+      }),
+    };
+  } catch (error) {
+    context.log(`Error fetching user permissions: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+app.http("getUserPermissions", {
+  methods: ["GET"],
+  route: "user/permissions",
+  authLevel: "anonymous",
+  handler: getUserPermissions,
 });
 
 // ============================================
@@ -555,45 +622,45 @@ async function updateHouse(request: HttpRequest, context: InvocationContext): Pr
   }
 }
 
-// Register Admin endpoints
+// Register Admin endpoints (use "manage" not "admin" - Azure reserves /admin/ for internal use)
 app.http("getAdminTenants", {
   methods: ["GET"],
-  route: "admin/tenants",
+  route: "manage/tenants",
   authLevel: "anonymous",
   handler: getAdminTenants,
 });
 
 app.http("updateTenant", {
   methods: ["PUT"],
-  route: "admin/tenants/{id}",
+  route: "manage/tenants/{id}",
   authLevel: "anonymous",
   handler: updateTenant,
 });
 
 app.http("getAdminFarms", {
   methods: ["GET"],
-  route: "admin/farms",
+  route: "manage/farms",
   authLevel: "anonymous",
   handler: getAdminFarms,
 });
 
 app.http("updateFarm", {
   methods: ["PUT"],
-  route: "admin/farms/{id}",
+  route: "manage/farms/{id}",
   authLevel: "anonymous",
   handler: updateFarm,
 });
 
 app.http("getAdminHouses", {
   methods: ["GET"],
-  route: "admin/houses",
+  route: "manage/houses",
   authLevel: "anonymous",
   handler: getAdminHouses,
 });
 
 app.http("updateHouse", {
   methods: ["PUT"],
-  route: "admin/houses/{id}",
+  route: "manage/houses/{id}",
   authLevel: "anonymous",
   handler: updateHouse,
 });
