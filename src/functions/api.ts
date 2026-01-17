@@ -26,77 +26,90 @@ async function getPool(): Promise<sql.ConnectionPool> {
   return pool;
 }
 
-// GET /api/farms - List all farms for a tenant (includes houses with latest sensor data)
+// GET /api/farms - List all farms (optionally filtered by tenant)
 async function getFarms(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  const tenantId = request.query.get("tenantId") || "arrowfoot";
+  const tenantId = request.query.get("tenantId") || null;
 
   try {
     const dbPool = await getPool();
 
-    // Get all farms for tenant
-    const farmsResult = await dbPool.request()
-      .input("tenantId", sql.NVarChar, tenantId)
-      .query(`
-        SELECT
-          f.FarmId as id,
-          f.TenantId as tenantId,
-          f.Name as name,
-          f.Location as location,
-          f.State as state,
-          f.Latitude as lat,
-          f.Longitude as lng,
-          f.Integrator as integrator
-        FROM Farms f
-        JOIN Tenants t ON f.TenantId = t.TenantId
-        WHERE t.Name = @tenantId AND f.IsActive = 1
-      `);
+    // Get all farms (optionally filtered by tenant)
+    const farmsReq = dbPool.request();
+    let farmsQuery = `
+      SELECT
+        f.FarmId as id,
+        f.TenantId as tenantId,
+        f.Name as name,
+        f.Location as location,
+        f.State as state,
+        f.Latitude as lat,
+        f.Longitude as lng,
+        f.Integrator as integrator
+      FROM Farms f
+      JOIN Tenants t ON f.TenantId = t.TenantId
+      WHERE f.IsActive = 1
+    `;
+    if (tenantId) {
+      farmsQuery += ` AND t.Name = @tenantId`;
+      farmsReq.input("tenantId", sql.NVarChar, tenantId);
+    }
+    const farmsResult = await farmsReq.query(farmsQuery);
 
-    // Get all houses with latest sensor events for these farms
-    const housesResult = await dbPool.request()
-      .input("tenantId", sql.NVarChar, tenantId)
-      .query(`
-        SELECT
-          h.HouseId as id,
-          h.FarmId as farmId,
-          h.Name as name,
-          h.Capacity as capacity,
-          h.CurrentBirds as currentBirds,
-          h.BirdAgeInDays as birdAgeInDays,
-          h.BirdAgeInDays as ageInDays,
-          h.FlockId as flockId,
-          h.Status as status,
-          h.DeviceId as deviceId,
-          h.UpdatedAt as lastUpdated
-        FROM Houses h
-        JOIN Farms f ON h.FarmId = f.FarmId
-        JOIN Tenants t ON f.TenantId = t.TenantId
-        WHERE t.Name = @tenantId AND h.IsActive = 1
-        ORDER BY h.FarmId, h.Name
-      `);
+    // Get all houses (optionally filtered by tenant)
+    const housesReq = dbPool.request();
+    let housesQuery = `
+      SELECT
+        h.HouseId as id,
+        h.FarmId as farmId,
+        h.Name as name,
+        h.Capacity as capacity,
+        h.CurrentBirds as currentBirds,
+        h.BirdAgeInDays as birdAgeInDays,
+        h.BirdAgeInDays as ageInDays,
+        h.FlockId as flockId,
+        h.Status as status,
+        h.DeviceId as deviceId,
+        h.UpdatedAt as lastUpdated
+      FROM Houses h
+      JOIN Farms f ON h.FarmId = f.FarmId
+      JOIN Tenants t ON f.TenantId = t.TenantId
+      WHERE h.IsActive = 1
+    `;
+    if (tenantId) {
+      housesQuery += ` AND t.Name = @tenantId`;
+      housesReq.input("tenantId", sql.NVarChar, tenantId);
+    }
+    housesQuery += ` ORDER BY h.FarmId, h.Name`;
+    const housesResult = await housesReq.query(housesQuery);
 
     // Get latest sensor data for each house
-    const sensorsResult = await dbPool.request()
-      .input("tenantId", sql.NVarChar, tenantId)
-      .query(`
-        WITH LatestEvents AS (
-          SELECT
-            se.HouseId,
-            et.Code,
-            se.Value,
-            se.BoolValue,
-            ROW_NUMBER() OVER (PARTITION BY se.HouseId, et.Code ORDER BY se.Timestamp DESC) as rn
-          FROM SensorEvents se
-          JOIN SensorEventTypes et ON se.EventTypeId = et.EventTypeId
-          JOIN Houses h ON se.HouseId = h.HouseId
-          JOIN Farms f ON h.FarmId = f.FarmId
-          JOIN Tenants t ON f.TenantId = t.TenantId
-          WHERE t.Name = @tenantId
-            AND se.Timestamp >= DATEADD(HOUR, -24, GETUTCDATE())
-        )
-        SELECT HouseId, Code, Value, BoolValue
-        FROM LatestEvents
-        WHERE rn = 1
-      `);
+    const sensorsReq = dbPool.request();
+    let sensorsQuery = `
+      WITH LatestEvents AS (
+        SELECT
+          se.HouseId,
+          et.Code,
+          se.Value,
+          se.BoolValue,
+          ROW_NUMBER() OVER (PARTITION BY se.HouseId, et.Code ORDER BY se.Timestamp DESC) as rn
+        FROM SensorEvents se
+        JOIN SensorEventTypes et ON se.EventTypeId = et.EventTypeId
+        JOIN Houses h ON se.HouseId = h.HouseId
+        JOIN Farms f ON h.FarmId = f.FarmId
+        JOIN Tenants t ON f.TenantId = t.TenantId
+        WHERE se.Timestamp >= DATEADD(HOUR, -24, GETUTCDATE())
+    `;
+    if (tenantId) {
+      sensorsQuery += ` AND t.Name = @tenantId`;
+      sensorsReq.input("tenantId", sql.NVarChar, tenantId);
+    }
+    sensorsQuery += `
+      )
+      SELECT HouseId, Code, Value, BoolValue
+      FROM LatestEvents
+      WHERE rn = 1
+    `;
+    const sensorsResult = await sensorsReq.query(sensorsQuery);
 
     // Build sensor data map by house
     const sensorsByHouse: Record<string, Record<string, number>> = {};
