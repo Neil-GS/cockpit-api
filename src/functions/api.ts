@@ -545,3 +545,181 @@ app.http("getTrendSummary", {
   authLevel: "anonymous",
   handler: getTrendSummary,
 });
+
+// ============================================
+// Sensor Event Types & Events Endpoints
+// ============================================
+
+// GET /api/event-types - Get all sensor event types
+async function getEventTypes(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const category = request.query.get("category") || null;
+
+  try {
+    const dbPool = await getPool();
+    const req = dbPool.request();
+
+    if (category) {
+      req.input("Category", sql.NVarChar, category);
+    } else {
+      req.input("Category", sql.NVarChar, null);
+    }
+    req.input("ActiveOnly", sql.Bit, true);
+
+    const result = await req.execute("usp_GetEventTypes");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching event types: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// GET /api/houses/:houseId/events - Get latest sensor events for a house
+async function getLatestEvents(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const houseId = request.params.houseId;
+  const category = request.query.get("category") || null;
+
+  try {
+    const dbPool = await getPool();
+    const req = dbPool.request()
+      .input("HouseId", sql.UniqueIdentifier, houseId);
+
+    if (category) {
+      req.input("Category", sql.NVarChar, category);
+    } else {
+      req.input("Category", sql.NVarChar, null);
+    }
+
+    const result = await req.execute("usp_GetLatestSensorEvents");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching latest events: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// GET /api/houses/:houseId/events/history - Get event history
+async function getEventHistory(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const houseId = request.params.houseId;
+  const hours = parseInt(request.query.get("hours") || "24");
+  const eventTypes = request.query.get("types") || null;
+
+  try {
+    const dbPool = await getPool();
+    const req = dbPool.request()
+      .input("HouseId", sql.UniqueIdentifier, houseId)
+      .input("Hours", sql.Int, hours);
+
+    if (eventTypes) {
+      req.input("EventTypes", sql.NVarChar, eventTypes);
+    } else {
+      req.input("EventTypes", sql.NVarChar, null);
+    }
+
+    const result = await req.execute("usp_GetSensorEventHistory");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching event history: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// POST /api/events - Insert sensor events (batch)
+async function postSensorEvents(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const body = await request.json() as { events: unknown[] };
+    const eventsJson = JSON.stringify(body.events);
+
+    const dbPool = await getPool();
+    const result = await dbPool.request()
+      .input("EventsJson", sql.NVarChar, eventsJson)
+      .execute("usp_InsertSensorEventBatch");
+
+    return {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inserted: result.recordset[0]?.EventsInserted || 0 }),
+    };
+  } catch (error) {
+    context.log(`Error inserting events: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// GET /api/thresholds - Get thresholds for a specific bird age
+async function getThresholds(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const birdAge = parseInt(request.query.get("birdAge") || "21");
+  const eventType = request.query.get("eventType") || null;
+
+  try {
+    const dbPool = await getPool();
+    const req = dbPool.request()
+      .input("BirdAgeDays", sql.Int, birdAge);
+
+    if (eventType) {
+      req.input("EventTypeCode", sql.NVarChar, eventType);
+    } else {
+      req.input("EventTypeCode", sql.NVarChar, null);
+    }
+
+    const result = await req.execute("usp_GetThresholdsForAge");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching thresholds: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+app.http("getEventTypes", {
+  methods: ["GET"],
+  route: "event-types",
+  authLevel: "anonymous",
+  handler: getEventTypes,
+});
+
+app.http("getLatestEvents", {
+  methods: ["GET"],
+  route: "houses/{houseId}/events",
+  authLevel: "anonymous",
+  handler: getLatestEvents,
+});
+
+app.http("getEventHistory", {
+  methods: ["GET"],
+  route: "houses/{houseId}/events/history",
+  authLevel: "anonymous",
+  handler: getEventHistory,
+});
+
+app.http("postSensorEvents", {
+  methods: ["POST"],
+  route: "events",
+  authLevel: "anonymous",
+  handler: postSensorEvents,
+});
+
+app.http("getThresholds", {
+  methods: ["GET"],
+  route: "thresholds",
+  authLevel: "anonymous",
+  handler: getThresholds,
+});
