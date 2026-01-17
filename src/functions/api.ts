@@ -1,6 +1,9 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import * as sql from "mssql";
 
+// Import IoT Hub trigger to ensure it's registered
+import "./ingestSensorData";
+
 // SQL connection configuration
 const sqlConfig: sql.config = {
   server: "cockpit-sql-eus2.database.windows.net",
