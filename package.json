@@ -2,7 +2,7 @@
   "name": "cockpit-api",
   "version": "1.0.0",
   "description": "Cockpit Controls API - Azure Functions",
-  "main": "dist/src/functions/*.js",
+  "main": "dist/functions/api.js",
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
