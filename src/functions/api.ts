@@ -246,3 +246,185 @@ app.http("getAlerts", {
   authLevel: "anonymous",
   handler: getAlerts,
 });
+
+// ============================================
+// Admin Endpoints
+// ============================================
+
+// GET /api/admin/tenants - List all tenants
+async function getAdminTenants(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const dbPool = await getPool();
+    const result = await dbPool.request().execute("usp_Admin_GetTenants");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching tenants: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// PUT /api/admin/tenants/:id - Update tenant
+async function updateTenant(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const tenantId = request.params.id;
+
+  try {
+    const body = await request.json() as { name?: string; displayName?: string; color?: string };
+    const dbPool = await getPool();
+
+    await dbPool.request()
+      .input("TenantId", sql.UniqueIdentifier, tenantId)
+      .input("Name", sql.NVarChar, body.name || null)
+      .input("DisplayName", sql.NVarChar, body.displayName || null)
+      .input("Color", sql.NVarChar, body.color || null)
+      .execute("usp_Admin_UpdateTenant");
+
+    return { status: 200, body: "Updated" };
+  } catch (error) {
+    context.log(`Error updating tenant: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// GET /api/admin/farms - List all farms
+async function getAdminFarms(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const dbPool = await getPool();
+    const result = await dbPool.request().execute("usp_Admin_GetFarms");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching farms: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// PUT /api/admin/farms/:id - Update farm
+async function updateFarm(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const farmId = request.params.id;
+
+  try {
+    const body = await request.json() as {
+      name?: string;
+      location?: string;
+      state?: string;
+      integrator?: string;
+      tenantId?: string;
+    };
+    const dbPool = await getPool();
+
+    await dbPool.request()
+      .input("FarmId", sql.UniqueIdentifier, farmId)
+      .input("Name", sql.NVarChar, body.name || null)
+      .input("Location", sql.NVarChar, body.location || null)
+      .input("State", sql.NVarChar, body.state || null)
+      .input("Integrator", sql.NVarChar, body.integrator || null)
+      .input("TenantId", sql.UniqueIdentifier, body.tenantId || null)
+      .execute("usp_Admin_UpdateFarm");
+
+    return { status: 200, body: "Updated" };
+  } catch (error) {
+    context.log(`Error updating farm: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// GET /api/admin/houses - List all houses
+async function getAdminHouses(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const dbPool = await getPool();
+    const result = await dbPool.request().execute("usp_Admin_GetHouses");
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching houses: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// PUT /api/admin/houses/:id - Update house
+async function updateHouse(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const houseId = request.params.id;
+
+  try {
+    const body = await request.json() as {
+      name?: string;
+      capacity?: number;
+      currentBirds?: number;
+      birdAgeInDays?: number;
+      status?: string;
+      farmId?: string;
+    };
+    const dbPool = await getPool();
+
+    await dbPool.request()
+      .input("HouseId", sql.UniqueIdentifier, houseId)
+      .input("Name", sql.NVarChar, body.name || null)
+      .input("Capacity", sql.Int, body.capacity || null)
+      .input("CurrentBirds", sql.Int, body.currentBirds || null)
+      .input("BirdAgeInDays", sql.Int, body.birdAgeInDays || null)
+      .input("Status", sql.NVarChar, body.status || null)
+      .input("FarmId", sql.UniqueIdentifier, body.farmId || null)
+      .execute("usp_Admin_UpdateHouse");
+
+    return { status: 200, body: "Updated" };
+  } catch (error) {
+    context.log(`Error updating house: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+// Register Admin endpoints
+app.http("getAdminTenants", {
+  methods: ["GET"],
+  route: "admin/tenants",
+  authLevel: "anonymous",
+  handler: getAdminTenants,
+});
+
+app.http("updateTenant", {
+  methods: ["PUT"],
+  route: "admin/tenants/{id}",
+  authLevel: "anonymous",
+  handler: updateTenant,
+});
+
+app.http("getAdminFarms", {
+  methods: ["GET"],
+  route: "admin/farms",
+  authLevel: "anonymous",
+  handler: getAdminFarms,
+});
+
+app.http("updateFarm", {
+  methods: ["PUT"],
+  route: "admin/farms/{id}",
+  authLevel: "anonymous",
+  handler: updateFarm,
+});
+
+app.http("getAdminHouses", {
+  methods: ["GET"],
+  route: "admin/houses",
+  authLevel: "anonymous",
+  handler: getAdminHouses,
+});
+
+app.http("updateHouse", {
+  methods: ["PUT"],
+  route: "admin/houses/{id}",
+  authLevel: "anonymous",
+  handler: updateHouse,
+});

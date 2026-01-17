@@ -7,8 +7,11 @@
 CREATE USER [cockpit-api-eus2] FROM EXTERNAL PROVIDER;
 GO
 
--- Grant read access to all tables
+-- Grant read/write access to all tables
 ALTER ROLE db_datareader ADD MEMBER [cockpit-api-eus2];
+GO
+
+ALTER ROLE db_datawriter ADD MEMBER [cockpit-api-eus2];
 GO
 
 -- Grant execute on stored procedures
