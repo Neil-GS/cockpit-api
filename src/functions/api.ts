@@ -26,35 +26,150 @@ async function getPool(): Promise<sql.ConnectionPool> {
   return pool;
 }
 
-// GET /api/farms - List all farms for a tenant
+// GET /api/farms - List all farms for a tenant (includes houses with latest sensor data)
 async function getFarms(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   const tenantId = request.query.get("tenantId") || "arrowfoot";
 
   try {
     const dbPool = await getPool();
-    const result = await dbPool.request()
+
+    // Get all farms for tenant
+    const farmsResult = await dbPool.request()
       .input("tenantId", sql.NVarChar, tenantId)
       .query(`
         SELECT
           f.FarmId as id,
+          f.TenantId as tenantId,
           f.Name as name,
           f.Location as location,
           f.State as state,
           f.Latitude as lat,
           f.Longitude as lng,
-          f.Integrator as integrator,
-          (SELECT COUNT(*) FROM Houses h WHERE h.FarmId = f.FarmId) as houseCount,
-          (SELECT SUM(CurrentBirds) FROM Houses h WHERE h.FarmId = f.FarmId) as totalBirds,
-          (SELECT SUM(Capacity) FROM Houses h WHERE h.FarmId = f.FarmId) as totalCapacity
+          f.Integrator as integrator
         FROM Farms f
         JOIN Tenants t ON f.TenantId = t.TenantId
         WHERE t.Name = @tenantId AND f.IsActive = 1
       `);
 
+    // Get all houses with latest sensor events for these farms
+    const housesResult = await dbPool.request()
+      .input("tenantId", sql.NVarChar, tenantId)
+      .query(`
+        SELECT
+          h.HouseId as id,
+          h.FarmId as farmId,
+          h.Name as name,
+          h.Capacity as capacity,
+          h.CurrentBirds as currentBirds,
+          h.BirdAgeInDays as birdAgeInDays,
+          h.BirdAgeInDays as ageInDays,
+          h.FlockId as flockId,
+          h.Status as status,
+          h.DeviceId as deviceId,
+          h.UpdatedAt as lastUpdated
+        FROM Houses h
+        JOIN Farms f ON h.FarmId = f.FarmId
+        JOIN Tenants t ON f.TenantId = t.TenantId
+        WHERE t.Name = @tenantId AND h.IsActive = 1
+        ORDER BY h.FarmId, h.Name
+      `);
+
+    // Get latest sensor data for each house
+    const sensorsResult = await dbPool.request()
+      .input("tenantId", sql.NVarChar, tenantId)
+      .query(`
+        WITH LatestEvents AS (
+          SELECT
+            se.HouseId,
+            et.Code,
+            se.Value,
+            se.BoolValue,
+            ROW_NUMBER() OVER (PARTITION BY se.HouseId, et.Code ORDER BY se.Timestamp DESC) as rn
+          FROM SensorEvents se
+          JOIN SensorEventTypes et ON se.EventTypeId = et.EventTypeId
+          JOIN Houses h ON se.HouseId = h.HouseId
+          JOIN Farms f ON h.FarmId = f.FarmId
+          JOIN Tenants t ON f.TenantId = t.TenantId
+          WHERE t.Name = @tenantId
+            AND se.Timestamp >= DATEADD(HOUR, -24, GETUTCDATE())
+        )
+        SELECT HouseId, Code, Value, BoolValue
+        FROM LatestEvents
+        WHERE rn = 1
+      `);
+
+    // Build sensor data map by house
+    const sensorsByHouse: Record<string, Record<string, number>> = {};
+    for (const sensor of sensorsResult.recordset) {
+      if (!sensorsByHouse[sensor.HouseId]) {
+        sensorsByHouse[sensor.HouseId] = {
+          temperature: 75,
+          humidity: 55,
+          ammonia: 15,
+          co2: 2000,
+          feedLevel: 70,
+          waterFlow: 5,
+          ventilation: 15000,
+          lighting: 20,
+        };
+      }
+      // Map event codes to sensor fields
+      const codeMap: Record<string, string> = {
+        temperature: "temperature",
+        humidity: "humidity",
+        ammonia: "ammonia",
+        co2: "co2",
+        feed_level: "feedLevel",
+        water_flow: "waterFlow",
+        fan_speed: "ventilation",
+        lighting: "lighting",
+      };
+      if (codeMap[sensor.Code]) {
+        sensorsByHouse[sensor.HouseId][codeMap[sensor.Code]] = sensor.Value ?? 0;
+      }
+    }
+
+    // Map houses to farms
+    const housesByFarm: Record<string, unknown[]> = {};
+    for (const house of housesResult.recordset) {
+      if (!housesByFarm[house.farmId]) {
+        housesByFarm[house.farmId] = [];
+      }
+      housesByFarm[house.farmId].push({
+        ...house,
+        sensors: sensorsByHouse[house.id] || {
+          temperature: 75,
+          humidity: 55,
+          ammonia: 15,
+          co2: 2000,
+          feedLevel: 70,
+          waterFlow: 5,
+          ventilation: 15000,
+          lighting: 20,
+          timestamp: new Date(),
+        },
+        alerts: [], // Alerts fetched separately
+      });
+    }
+
+    // Build final farms array
+    const farms = farmsResult.recordset.map((farm: any) => {
+      const houses = housesByFarm[farm.id] || [];
+      return {
+        ...farm,
+        coordinates: { lat: farm.lat, lng: farm.lng },
+        houses,
+        totalCapacity: houses.reduce((sum: number, h: any) => sum + (h.capacity || 0), 0),
+        totalBirds: houses.reduce((sum: number, h: any) => sum + (h.currentBirds || 0), 0),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+    });
+
     return {
       status: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(result.recordset),
+      body: JSON.stringify(farms),
     };
   } catch (error) {
     context.log(`Error fetching farms: ${error}`);
@@ -248,6 +363,44 @@ app.http("getAlerts", {
   route: "alerts",
   authLevel: "anonymous",
   handler: getAlerts,
+});
+
+// GET /tenants - List all tenants (public)
+async function getTenants(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const dbPool = await getPool();
+    const result = await dbPool.request().query(`
+      SELECT
+        t.TenantId as id,
+        t.Name as name,
+        t.DisplayName as displayName,
+        COALESCE(t.Color, '#10B981') as color,
+        COUNT(DISTINCT f.FarmId) as farmCount,
+        COALESCE(SUM(h.CurrentBirds), 0) as totalBirds
+      FROM Tenants t
+      LEFT JOIN Farms f ON t.TenantId = f.TenantId AND f.IsActive = 1
+      LEFT JOIN Houses h ON f.FarmId = h.FarmId AND h.IsActive = 1
+      WHERE t.IsActive = 1
+      GROUP BY t.TenantId, t.Name, t.DisplayName, t.Color
+      ORDER BY t.Name
+    `);
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result.recordset),
+    };
+  } catch (error) {
+    context.log(`Error fetching tenants: ${error}`);
+    return { status: 500, body: "Internal server error" };
+  }
+}
+
+app.http("getTenants", {
+  methods: ["GET"],
+  route: "tenants",
+  authLevel: "anonymous",
+  handler: getTenants,
 });
 
 // ============================================
@@ -725,4 +878,239 @@ app.http("getThresholds", {
   route: "thresholds",
   authLevel: "anonymous",
   handler: getThresholds,
+});
+
+// ============================================
+// Weather API (using Open-Meteo - free, no key)
+// ============================================
+
+interface WeatherResponse {
+  temperature: number;
+  humidity: number;
+  windSpeed: number;
+  condition: string;
+  forecast: Array<{
+    day: string;
+    high: number;
+    low: number;
+    condition: string;
+  }>;
+}
+
+async function getWeather(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const lat = parseFloat(request.query.get("lat") || "36.0");
+  const lng = parseFloat(request.query.get("lng") || "-79.0");
+
+  try {
+    // Fetch current weather and forecast from Open-Meteo
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FNew_York&forecast_days=3`;
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Weather API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Map weather codes to conditions
+    const getCondition = (code: number): string => {
+      if (code === 0) return "sunny";
+      if (code <= 3) return "cloudy";
+      if (code <= 67 || (code >= 80 && code <= 82)) return "rainy";
+      if (code >= 71 && code <= 77) return "cold";
+      return "cloudy";
+    };
+
+    const days = ["Today", "Tomorrow", "Day 3"];
+    const weather: WeatherResponse = {
+      temperature: Math.round(data.current.temperature_2m),
+      humidity: Math.round(data.current.relative_humidity_2m),
+      windSpeed: Math.round(data.current.wind_speed_10m),
+      condition: getCondition(data.current.weather_code),
+      forecast: data.daily.time.map((date: string, i: number) => ({
+        day: days[i] || date,
+        high: Math.round(data.daily.temperature_2m_max[i]),
+        low: Math.round(data.daily.temperature_2m_min[i]),
+        condition: getCondition(data.daily.weather_code[i]),
+      })),
+    };
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(weather),
+    };
+  } catch (error) {
+    context.log(`Error fetching weather: ${error}`);
+    return { status: 500, body: "Failed to fetch weather data" };
+  }
+}
+
+app.http("getWeather", {
+  methods: ["GET"],
+  route: "weather",
+  authLevel: "anonymous",
+  handler: getWeather,
+});
+
+// ============================================
+// Equipment Runtime API
+// ============================================
+
+async function getEquipmentRuntime(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const tenantId = request.query.get("tenantId") || "arrowfoot";
+
+  try {
+    const dbPool = await getPool();
+
+    // Get equipment status events from today
+    const result = await dbPool.request()
+      .input("TenantId", sql.NVarChar, tenantId)
+      .query(`
+        WITH TodayEvents AS (
+          SELECT
+            se.HouseId,
+            t.Code as EventType,
+            se.BoolValue,
+            se.Value,
+            se.Timestamp,
+            ROW_NUMBER() OVER (PARTITION BY se.HouseId, t.Code ORDER BY se.Timestamp DESC) as rn
+          FROM SensorEvents se
+          INNER JOIN SensorEventTypes t ON se.EventTypeId = t.EventTypeId
+          INNER JOIN Houses h ON se.HouseId = h.HouseId
+          INNER JOIN Farms f ON h.FarmId = f.FarmId
+          INNER JOIN Tenants tn ON f.TenantId = tn.TenantId
+          WHERE tn.Name = @TenantId
+            AND se.Timestamp >= CAST(GETUTCDATE() AS DATE)
+            AND t.Code IN ('fan_status', 'heater_status', 'fogger_status', 'curtain_position')
+        ),
+        LatestStatus AS (
+          SELECT HouseId, EventType, BoolValue, Value
+          FROM TodayEvents
+          WHERE rn = 1
+        ),
+        HouseCounts AS (
+          SELECT COUNT(DISTINCT h.HouseId) as TotalHouses
+          FROM Houses h
+          INNER JOIN Farms f ON h.FarmId = f.FarmId
+          INNER JOIN Tenants t ON f.TenantId = t.TenantId
+          WHERE t.Name = @TenantId AND h.Status = 'active'
+        ),
+        EquipmentStats AS (
+          SELECT
+            EventType,
+            COUNT(CASE WHEN BoolValue = 1 OR Value > 50 THEN 1 END) as ActiveCount,
+            COUNT(*) as ReportingCount
+          FROM LatestStatus
+          GROUP BY EventType
+        )
+        SELECT
+          es.EventType,
+          es.ActiveCount,
+          es.ReportingCount,
+          hc.TotalHouses,
+          -- Estimate runtime hours based on % of day equipment was active (simplified)
+          CASE
+            WHEN es.EventType = 'heater_status' THEN es.ActiveCount * 4.5
+            WHEN es.EventType = 'fan_status' THEN es.ActiveCount * 6.0
+            WHEN es.EventType = 'fogger_status' THEN es.ActiveCount * 2.0
+            ELSE es.ActiveCount * 8.0
+          END as EstimatedRuntimeHours
+        FROM EquipmentStats es
+        CROSS JOIN HouseCounts hc
+      `);
+
+    // Also get lighting status from sensor readings
+    const lightingResult = await dbPool.request()
+      .input("TenantId", sql.NVarChar, tenantId)
+      .query(`
+        SELECT
+          COUNT(CASE WHEN se.Value > 5 THEN 1 END) as LightsOn,
+          COUNT(*) as TotalHouses
+        FROM (
+          SELECT h.HouseId,
+            (SELECT TOP 1 Value FROM SensorEvents se2
+             INNER JOIN SensorEventTypes t ON se2.EventTypeId = t.EventTypeId
+             WHERE se2.HouseId = h.HouseId AND t.Code = 'lighting'
+             ORDER BY se2.Timestamp DESC) as Value
+          FROM Houses h
+          INNER JOIN Farms f ON h.FarmId = f.FarmId
+          INNER JOIN Tenants t ON f.TenantId = t.TenantId
+          WHERE t.Name = @TenantId AND h.Status = 'active'
+        ) se
+      `);
+
+    // Format response
+    const equipmentData = [
+      {
+        name: "Heaters",
+        eventType: "heater_status",
+        activeCount: 0,
+        totalCount: 0,
+        runtimeHours: 0,
+        costPerHour: 2.50,
+        costUnit: "propane",
+      },
+      {
+        name: "Ventilation",
+        eventType: "fan_status",
+        activeCount: 0,
+        totalCount: 0,
+        runtimeHours: 0,
+        costPerHour: 1.50,
+        costUnit: "electricity",
+      },
+      {
+        name: "Foggers",
+        eventType: "fogger_status",
+        activeCount: 0,
+        totalCount: 0,
+        runtimeHours: 0,
+        costPerHour: 0.50,
+        costUnit: "water",
+      },
+      {
+        name: "Lighting",
+        eventType: "lighting",
+        activeCount: lightingResult.recordset[0]?.LightsOn || 0,
+        totalCount: lightingResult.recordset[0]?.TotalHouses || 0,
+        runtimeHours: (lightingResult.recordset[0]?.LightsOn || 0) * 8,
+        costPerHour: 0.75,
+        costUnit: "electricity",
+      },
+    ];
+
+    // Merge SQL results
+    for (const row of result.recordset) {
+      const eq = equipmentData.find(e => e.eventType === row.EventType);
+      if (eq) {
+        eq.activeCount = row.ActiveCount;
+        eq.totalCount = row.TotalHouses;
+        eq.runtimeHours = row.EstimatedRuntimeHours;
+      }
+    }
+
+    // Calculate costs
+    const response = equipmentData.map(eq => ({
+      ...eq,
+      utilizationPercent: eq.totalCount > 0 ? (eq.activeCount / eq.totalCount) * 100 : 0,
+      estimatedCost: eq.runtimeHours * eq.costPerHour,
+    }));
+
+    return {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(response),
+    };
+  } catch (error) {
+    context.log(`Error fetching equipment runtime: ${error}`);
+    return { status: 500, body: "Failed to fetch equipment data" };
+  }
+}
+
+app.http("getEquipmentRuntime", {
+  methods: ["GET"],
+  route: "equipment/runtime",
+  authLevel: "anonymous",
+  handler: getEquipmentRuntime,
 });
